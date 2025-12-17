@@ -1,5 +1,9 @@
 #include <Arduino.h>
 #include <LiquidCrystal.h>
+#include <WiFi.h>
+#include "secrets.h" 
+#include <BlynkSimpleEsp32.h>
+ 
 
 
 // ---------------------------
@@ -22,6 +26,19 @@ LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
 
 
 // ---------------------------
+// BLYNK & WIFI CREDENTIALS
+// ---------------------------
+
+// Use the credentials from secrets.h
+char auth[] = BLYNK_AUTH_TOKEN;
+char ssid[] = WIFI_SSID;
+char pass[] = WIFI_PASSWORD;
+
+// Blynk timer
+BlynkTimer timer;
+
+
+// ---------------------------
 // Calibration and Settings
 // ---------------------------
 
@@ -34,38 +51,11 @@ const int SOIL_WET_THRESHOLD = 1550; // If < 1550, stop watering b/c wet
 
 // State Variable
 bool isPumpRunning = false;
+bool manualOverride = false; // For manual control via Blynk
 
 // To determine water bucket low
 int lowWaterCount = 0;
 const int LOW_WATER_CONFIRMATIONS = 3;
-
-
-// ---------------------------
-// SETUP
-// ---------------------------
-
-void setup() {
-  Serial.begin(115200);
-
-  // LCD
-  lcd.begin(16, 2);
-  lcd.print("System Start...");
-  delay(1500);
-  lcd.clear();
-
-  // Relay control
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, HIGH); // pump OFF (active LOW)
-
-  // Ultrasonic
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-
-  // Soil moisture
-  pinMode(SOIL_PIN, INPUT);
-
-  Serial.println("Setup complete.");
-}
 
 
 // ---------------------------
@@ -109,10 +99,115 @@ long getDistanceCM() {
 
 
 // ---------------------------
+// Send data to Blynk
+// ---------------------------
+
+void sendSensorData() {
+
+  int soil = analogRead(SOIL_PIN);
+  int moisturePercent = map(soil, SOIL_DRY_THRESHOLD, SOIL_WET_THRESHOLD, 0, 100);
+  moisturePercent = constrain(moisturePercent, 0, 100);
+  
+  long waterLevel = getDistanceCM();
+  
+  // Send to Blynk virtual pins
+  Blynk.virtualWrite(V0, moisturePercent);      // Moisture %
+  Blynk.virtualWrite(V1, waterLevel);           // Water level
+  Blynk.virtualWrite(V2, isPumpRunning ? 1 : 0); // Pump status
+  Blynk.virtualWrite(V3, soil);                 // Raw soil value
+
+}
+
+
+// ---------------------------
+// Manual pump control from Blynk
+// ---------------------------
+
+BLYNK_WRITE(V4) {
+
+  int buttonState = param.asInt();
+  
+   
+  if (buttonState == 1) {
+
+    manualOverride = true;
+    digitalWrite(RELAY_PIN, LOW); // Pump ON
+    isPumpRunning = true;
+
+    Blynk.logEvent("pump_manual", "Manual pump activated");
+
+  } 
+  else {
+
+    manualOverride = false;
+    digitalWrite(RELAY_PIN, HIGH); // Pump OFF
+    isPumpRunning = false;
+
+  }
+}
+
+
+// ---------------------------
+// SETUP
+// ---------------------------
+
+void setup() {
+
+  Serial.begin(115200);
+
+  // LCD
+  lcd.begin(16, 2);
+  lcd.print("System Start...");
+  delay(1500);
+  lcd.clear();
+
+  // Relay control
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH); // pump OFF (active LOW)
+
+  // Ultrasonic
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  // Soil moisture 
+  pinMode(SOIL_PIN, INPUT);
+
+  // Connect to Blynk/Wifi
+  lcd.print("Connecting WiFi");
+  Blynk.begin(auth, ssid, pass);
+  lcd.clear();
+  lcd.print("WiFi Connected!");
+  delay(1000);
+  lcd.clear();
+
+  // Setup Blynk timer to send data every second
+  timer.setInterval(1000L, sendSensorData);
+
+  Serial.println("Setup complete.");
+}
+
+
+// ---------------------------
 // MAIN LOOP
 // ---------------------------
 
 void loop() {
+
+  Blynk.run();
+  timer.run();
+
+  // Skip automatic control if manual override is active
+  if (manualOverride) {
+
+    lcd.setCursor(0, 0);
+    lcd.print("MANUAL MODE    ");
+    lcd.setCursor(0, 1);
+    lcd.print("Pump: ");
+    lcd.print(isPumpRunning ? "ON " : "OFF");
+    delay(500);
+    return;
+
+  }
 
   // Read moisture sensor
   int soil = analogRead(SOIL_PIN);  // 0–4095
@@ -124,6 +219,14 @@ void loop() {
   // Convert to moisture percentage (DISPLAY ONLY)
   int moisturePercent = map(soil,SOIL_DRY_THRESHOLD,  SOIL_WET_THRESHOLD, 0, 100);
   moisturePercent = constrain(moisturePercent, 0, 100);
+
+
+  // Moisture (Percentage)
+  lcd.setCursor(0, 0);
+  lcd.print("Moisture:");
+  lcd.print(" ");
+  lcd.print(moisturePercent);
+  lcd.print("%   ");
   
 
   // Read ultrasonic distance ONLY when pump is OFF
@@ -154,6 +257,9 @@ void loop() {
       isPumpRunning = false;
       Serial.println("WARNING: Low Water!"); // for checking
 
+      // Send notification to Blynk
+      Blynk.logEvent("low_water", "Water tank is empty!");
+
     } 
     
   }
@@ -171,7 +277,7 @@ void loop() {
       lcd.setCursor(0, 1);
       lcd.print("Pump: ON      ");
 
-      delay(3000); // pump on 3s
+      delay(2000); // pump on 2s. Adjust base on plant water needs
       Serial.println("Soil dry -> Pump ON"); // for checking
 
 
@@ -201,13 +307,6 @@ void loop() {
 
   // Display on LCD
 
-  // Moisture (Percentage)
-  lcd.setCursor(0, 0);
-  lcd.print("Moisture:");
-  lcd.print(" ");
-  lcd.print(moisturePercent);
-  lcd.print("%   ");
-
   // Pump status or Low Water Warning
   lcd.setCursor(0, 1);
 
@@ -235,6 +334,6 @@ void loop() {
   delay(500);
 
 }
-
+   
 
 
